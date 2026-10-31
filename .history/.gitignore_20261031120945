@@ -1,0 +1,19 @@
+# Python 暫存與虛擬環境
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+ENV/
+
+# 企業工作區動態生成內容與上傳快取
+enterprise_workspace/02_tasks/uploads/*
+enterprise_workspace/03_delivery/*
+enterprise_workspace/04_history/failure_audits/*
+!enterprise_workspace/**/.gitkeep
+
+# 系統與編輯器暫存
+.vscode/
+.idea/
+*.tmp
+*.log

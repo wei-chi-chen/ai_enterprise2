@@ -1,0 +1,7 @@
+[
+  {
+    "task_id": "TASK-403",
+    "rule": "Generated Python tests still fail after three escalating repairs. Check the test's actual requirements and verify each module follows the shared symbol contract. Failure: failed to connect to the docker API at npipe:////./pipe/dockerDesktopLinuxEngine; check if the path is correct and if the daemon is running: open //./pipe/dockerDesktopLinuxEngine: The system cannot find the file specified.",
+    "time": "2026-10-30 14:36:41"
+  }
+]

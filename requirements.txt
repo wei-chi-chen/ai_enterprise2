@@ -1,0 +1,13 @@
+fastapi
+uvicorn
+httpx
+rich
+psutil
+pandas
+pyarrow
+openpyxl
+matplotlib
+pillow
+imageio-ffmpeg
+python-multipart
+websockets

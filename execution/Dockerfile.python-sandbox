@@ -1,0 +1,6 @@
+FROM python:3.13-slim
+
+COPY execution/requirements-sandbox.txt /tmp/requirements-sandbox.txt
+RUN pip install --no-cache-dir -r /tmp/requirements-sandbox.txt
+
+WORKDIR /workspace
