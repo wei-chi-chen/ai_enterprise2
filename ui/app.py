@@ -197,18 +197,33 @@ def _get_task_deliveries_sync(
 
 
 @app.post("/api/config/memory")
-async def update_memory_budget(budget_gb: float = Form(..., ge=0.1, le=512)):
-    budget_gb = round(budget_gb, 1)
-    daemon.pool.set_hardware_budget(budget_gb)
+async def update_memory_budget(
+    gpu_budget_gb: float = Form(..., ge=0.0, le=512),
+    ram_budget_gb: float = Form(..., ge=0.0, le=512)
+):
+    gpu_budget_gb = round(gpu_budget_gb, 1)
+    ram_budget_gb = round(ram_budget_gb, 1)
+    if gpu_budget_gb + ram_budget_gb <= 0:
+        raise HTTPException(status_code=400, detail="總預算必須大於 0 GB")
+    
+    daemon.pool.set_hardware_budgets(gpu_budget_gb, ram_budget_gb)
+    total = gpu_budget_gb + ram_budget_gb
     try:
         swarm = daemon.pool.plan_greedy_swarm()
         models = [m["name"] for m in swarm]
-        message = f"⚡ 記憶體上限已更新為 {budget_gb} GB！可調度 {len(swarm)} 個模型槽位：{models}"
-    except RuntimeError as exc:
+        message = f"⚡ 預算已更新：GPU {gpu_budget_gb} GB + RAM {ram_budget_gb} GB (總計 {total} GB)！槽位：{models}"
+    except Exception as exc:
         models = []
-        message = f"⚠ 記憶體上限已更新為 {budget_gb} GB，但目前無可調度模型：{exc}"
+        message = f"⚠ 預算已更新 (GPU {gpu_budget_gb}G, RAM {ram_budget_gb}G)，但目前無可調度模型：{exc}"
     daemon.emit_log("SYS", message)
-    return {"status": "ok", "budget_gb": budget_gb, "models": models, "model_error": daemon.pool.last_error}
+    return {
+        "status": "ok",
+        "gpu_budget_gb": gpu_budget_gb,
+        "ram_budget_gb": ram_budget_gb,
+        "budget_gb": total,
+        "models": models,
+        "model_error": daemon.pool.last_error
+    }
 
 
 @app.post("/api/tasks/{task_id}/retry")
@@ -534,8 +549,10 @@ HTML_UI = """
   </div>
   <div class="ctrl-group">
     <div class="mem-ctrl-group">
-      <span id="ui-mem-label" data-i18n="memLabel">記憶體 (GB):</span>
-      <input type="number" id="mem-input" value="40" min="0.1" max="512" step="0.1" style="width:52px;min-width:52px;margin:0;padding:2px 4px;font-size:11px;flex-shrink:0;" />
+      <span style="color:#38bdf8;font-weight:600;">GPU (GB):</span>
+      <input type="number" id="gpu-input" value="6.0" min="0" max="512" step="0.5" style="width:46px;margin:0;padding:2px 4px;font-size:11px;" />
+      <span style="color:#a78bfa;font-weight:600;">RAM (GB):</span>
+      <input type="number" id="ram-input" value="16.0" min="0" max="512" step="1.0" style="width:46px;margin:0;padding:2px 4px;font-size:11px;" />
       <button class="btn btn-resume" onclick="applyMemory()" id="ui-btn-apply" data-i18n="apply" style="padding:3px 6px;font-size:11px;">套用</button>
     </div>
     <span id="mem-update-status" class="memory-update-status" role="status" aria-live="polite"></span>
@@ -1532,7 +1549,15 @@ HTML_UI = """
     const res = await fetch('/api/init');
     const data = await res.json();
     currentInitData = data;
-    document.getElementById('mem-input').value = data.budget_gb;
+    
+    if (data.gpu && data.gpu.total_gb) {
+      document.getElementById('gpu-input').value = Math.min(data.budget_gb, data.gpu.total_gb);
+      document.getElementById('ram-input').value = Math.max(0, data.budget_gb - Number(document.getElementById('gpu-input').value));
+    } else {
+      document.getElementById('gpu-input').value = 6.0;
+      document.getElementById('ram-input').value = Math.max(0, data.budget_gb - 6.0);
+    }
+    
     renderHardwareStatus(data);
     renderMemoryUsage(data.memory?.used_gb || 0, data.budget_gb);
     renderTaskBacklog(data.tasks);
@@ -1565,44 +1590,24 @@ HTML_UI = """
   }
 
   async function applyMemory() {
-    const input = document.getElementById('mem-input');
-    const val = Number(input.value);
-    if (!input.value || !input.checkValidity() || !Number.isFinite(val) || val < 0.1 || val > 512) {
-      memoryUpdateResult = { key: 'invalidMemoryBudget', isError: true };
-      renderMemoryUpdateStatus();
+    const gpuVal = Number(document.getElementById('gpu-input').value);
+    const ramVal = Number(document.getElementById('ram-input').value);
+    if (isNaN(gpuVal) || isNaN(ramVal) || (gpuVal + ramVal) <= 0) {
+      alert("請輸入有效的 GPU 與 RAM 預算（兩者總和須大於 0）");
       return;
     }
     const fd = new FormData();
-    fd.append('budget_gb', String(val));
+    fd.append('gpu_budget_gb', String(gpuVal));
+    fd.append('ram_budget_gb', String(ramVal));
     try {
       const response = await fetch('/api/config/memory', { method: 'POST', body: fd });
       const result = await response.json();
-      if (!response.ok) {
-        const detail = typeof result.detail === 'string' ? result.detail : response.statusText;
-        throw new Error(detail);
-      }
-      input.value = result.budget_gb;
-      if (currentInitData) currentInitData.budget_gb = result.budget_gb;
-      renderMemoryUsage(
-        currentTelemetry?.used_memory_gb ?? currentInitData?.memory?.used_gb ?? 0,
-        result.budget_gb
-      );
+      if (!response.ok) throw new Error(result.detail || response.statusText);
+      
       memoryUpdateResult = { key: 'memorySaved' };
-      try {
-        await initLoad();
-      } catch (error) {
-        memoryUpdateResult = {
-          key: 'memoryRefreshError',
-          detail: error.message || String(error),
-          isError: true
-        };
-      }
+      await initLoad();
     } catch (error) {
-      memoryUpdateResult = {
-        key: 'memorySaveError',
-        detail: error.message || String(error),
-        isError: true
-      };
+      memoryUpdateResult = { key: 'memorySaveError', detail: error.message, isError: true };
     }
     renderMemoryUpdateStatus();
   }

@@ -20,7 +20,9 @@ MEM_USAGE_FILE = TASK_ZONE / "memory_usage.json"
 BACKLOG_FILE = TASK_ZONE / "task_backlog.json"
 LESSONS_FILE = HISTORY_ZONE / "lessons_learned.json"
 
-DEFAULT_MAX_MEMORY_GB = 40.0
+DEFAULT_GPU_BUDGET_GB = 6.0
+DEFAULT_RAM_BUDGET_GB = 16.0
+DEFAULT_MAX_MEMORY_GB = DEFAULT_GPU_BUDGET_GB + DEFAULT_RAM_BUDGET_GB
 OLLAMA_API_URL = "http://localhost:11434"
 
 for p in [
@@ -39,7 +41,9 @@ for p in [
     p.mkdir(parents=True, exist_ok=True)
 
 if not ROSTER_FILE.exists():
-    ROSTER_FILE.write_text(json.dumps({"hardware_budget_gb": DEFAULT_MAX_MEMORY_GB}, indent=2), encoding="utf-8")
+    ROSTER_FILE.write_text(json.dumps({"gpu_budget_gb": DEFAULT_GPU_BUDGET_GB,
+        "ram_budget_gb": DEFAULT_RAM_BUDGET_GB,
+        "hardware_budget_gb": DEFAULT_MAX_MEMORY_GB}, indent=2), encoding="utf-8")
 
 if not CONTROL_FILE.exists():
     CONTROL_FILE.write_text(json.dumps({
@@ -51,3 +55,4 @@ if not CONTROL_FILE.exists():
 for f in [BACKLOG_FILE, LESSONS_FILE]:
     if not f.exists():
         f.write_text("[]", encoding="utf-8")
+

@@ -1,3 +1,5 @@
 {
-  "hardware_budget_gb": 40.0
+  "gpu_budget_gb": 6.0,
+  "ram_budget_gb": 0.0,
+  "hardware_budget_gb": 6.0
 }

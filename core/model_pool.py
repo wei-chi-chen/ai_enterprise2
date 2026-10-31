@@ -222,16 +222,16 @@ class DynamicModelPool:
     @staticmethod
     def _estimate_output_tokens(role: str, prompt: str, action_desc: str) -> int:
         context = f"{role} {action_desc} {prompt[:2000]}".casefold()
-        if any(term in context for term in [
+        if any(term in context for term in ["json", "拆解", "規劃", "route", "分鏡", "自主判斷"]):
+            estimate = 600
+        elif any(term in context for term in [
             "並行實作", "implement", "write code", "module", "python code", "javascript"
         ]):
             estimate = 2400
         elif any(term in context for term in [
-            "report", "審查", "稽核", "screenplay", "劇本", "分析", "分析需求"
+            "report", "審查", "稽核", "screenplay", "劇本", "綜合交付報告"
         ]):
-            estimate = 1600
-        elif any(term in context for term in ["json", "拆解", "規劃", "route", "分鏡"]):
-            estimate = 1000
+            estimate = 2000
         else:
             estimate = 800
         return max(256, min(estimate, 4096))
@@ -269,24 +269,40 @@ class DynamicModelPool:
                 })
             return workers
 
-    def get_hardware_budget(self) -> float:
+    def get_hardware_budgets(self) -> Dict[str, float]:
         if not ROSTER_FILE.exists():
-            return DEFAULT_MAX_MEMORY_GB
+            return {"gpu_gb": 6.0, "ram_gb": 16.0, "total_gb": 22.0}
         try:
             data = json.loads(ROSTER_FILE.read_text(encoding="utf-8"))
-            budget = float(data.get("hardware_budget_gb", DEFAULT_MAX_MEMORY_GB))
-            if not math.isfinite(budget) or budget <= 0:
+            gpu = float(data.get("gpu_budget_gb", 6.0))
+            ram = float(data.get("ram_budget_gb", 16.0))
+            total = float(data.get("hardware_budget_gb", gpu + ram))
+            if not math.isfinite(total) or total <= 0:
                 raise ValueError("the configured value must be positive and finite")
-            return budget
-        except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
-            raise RuntimeError(f"Could not read the hardware memory budget from {ROSTER_FILE}: {exc}") from exc
+            return {"gpu_gb": gpu, "ram_gb": ram, "total_gb": total}
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            return {"gpu_gb": 6.0, "ram_gb": 16.0, "total_gb": 22.0}
+
+    def get_hardware_budget(self) -> float:
+        return self.get_hardware_budgets()["total_gb"]
+
+    def set_hardware_budgets(self, gpu_gb: float, ram_gb: float):
+        if not math.isfinite(gpu_gb) or not math.isfinite(ram_gb) or (gpu_gb + ram_gb) <= 0:
+            raise ValueError("Hardware memory budget must be valid.")
+        with self.cond:
+            ROSTER_FILE.write_text(json.dumps({
+                "gpu_budget_gb": round(float(gpu_gb), 1),
+                "ram_budget_gb": round(float(ram_gb), 1),
+                "hardware_budget_gb": round(float(gpu_gb + ram_gb), 1)
+            }, indent=2), encoding="utf-8")
+            self.cond.notify_all()
 
     def set_hardware_budget(self, budget_gb: float):
-        if not math.isfinite(budget_gb) or budget_gb <= 0:
-            raise ValueError("Hardware memory budget must be a positive finite number.")
-        with self.cond:
-            ROSTER_FILE.write_text(json.dumps({"hardware_budget_gb": round(float(budget_gb), 1)}, indent=2), encoding="utf-8")
-            self.cond.notify_all()
+        budgets = self.get_hardware_budgets()
+        ratio_gpu = budgets["gpu_gb"] / max(0.1, budgets["total_gb"])
+        new_gpu = round(budget_gb * ratio_gpu, 1)
+        new_ram = round(budget_gb - new_gpu, 1)
+        self.set_hardware_budgets(new_gpu, new_ram)
 
     def get_gpu_info(self) -> Dict:
         """Return NVIDIA GPU memory from nvidia-smi when available."""
@@ -572,9 +588,12 @@ class DynamicModelPool:
     def plan_greedy_swarm(self, num_ctx: int = BASE_CONTEXT_TOKENS) -> List[Dict]:
         """Select as many distinct completion-capable models as fit the configured budget."""
         self.refresh_models()
-        budget = self.get_hardware_budget()
+        budgets = self.get_hardware_budgets()
+        total_budget = budgets["total_gb"]
+        gpu_budget = budgets["gpu_gb"]
+        
         available_budget = max(
-            0.0, budget - float(getattr(self, "reserved_memory_gb", 0.0))
+            0.0, total_budget - float(getattr(self, "reserved_memory_gb", 0.0))
         )
         candidates = [
             model for model in self.available_models
@@ -599,14 +618,18 @@ class DynamicModelPool:
             minimum_memory += cost
             target_count += 1
 
-        candidates_by_fairness = sorted(
-            candidates,
-            key=lambda model: (
+        def swarm_priority(model: Dict) -> tuple:
+            slot_mem = costs[model["name"]]
+            fits_in_gpu = (slot_mem <= gpu_budget)
+            tier = 0 if fits_in_gpu else 1
+            return (
+                tier,
                 self.usage_counter.get(model["name"], 0),
-                costs[model["name"]],
+                slot_mem,
                 model["name"]
             )
-        )
+
+        candidates_by_fairness = sorted(candidates, key=swarm_priority)
         swarm = []
         used_gb = 0.0
         for index, model in enumerate(candidates_by_fairness):
@@ -677,7 +700,10 @@ class DynamicModelPool:
 
     def rank_models_for_role(self, role: str, num_ctx: int = BASE_CONTEXT_TOKENS) -> List[Dict]:
         self.refresh_models()
-        budget = self.get_hardware_budget()
+        budgets = self.get_hardware_budgets()
+        total_budget = budgets["total_gb"]
+        gpu_budget = budgets["gpu_gb"]
+        
         required_capability = "decision" if role == "decision" else "completion"
         valid = [
             model for model in self.available_models
@@ -693,7 +719,7 @@ class DynamicModelPool:
                 not self.model_profile(model["name"]).get("max_context")
                 or num_ctx <= self.model_profile(model["name"])["max_context"]
             )
-            and self._slot_memory_gb(model, num_ctx) <= budget
+            and self._slot_memory_gb(model, num_ctx) <= total_budget
             and (
                 self._model_context_length(model) <= 0
                 or self.context_limit(model) >= num_ctx
@@ -704,7 +730,7 @@ class DynamicModelPool:
                 if not any(model.get("supports_decision", False) for model in self.available_models):
                     raise ModelPoolError("No decision-capable Ollama models are available.")
                 raise ModelPoolError(
-                    f"No decision-capable Ollama model fits the configured memory budget of {budget:.1f} GB."
+                    f"No decision-capable Ollama model fits the configured memory budget of {total_budget:.1f} GB."
                 )
             if not self.available_models or not any(
                 model.get("supports_completion", True) for model in self.available_models
@@ -714,7 +740,7 @@ class DynamicModelPool:
                     f"No {capability} Ollama models are available."
                 )
             raise ModelPoolError(
-                f"No installed Ollama model fits the configured memory budget of {budget:.1f} GB."
+                f"No installed Ollama model fits the configured memory budget of {total_budget:.1f} GB."
             )
 
         if role == "vision":
@@ -728,27 +754,30 @@ class DynamicModelPool:
         memory_info = self.sync_realtime_memory()
         resident_vram = memory_info.get("model_vram_gb", {}) if memory_info.get("available") else {}
 
-        def gpu_fit_penalty(model: Dict) -> bool:
-            if not gpu_info.get("available"):
-                return False
-            model_name = model["name"]
-            resident_gb = float(resident_vram.get(model_name, 0.0) or 0.0)
-            additional_gb = max(
-                0.0,
-                self._slot_memory_gb(model, num_ctx) - resident_gb,
-            )
-            return additional_gb > gpu_info["free_gb"]
-
-        return sorted(
-            valid,
-            key=lambda model: (
-                gpu_fit_penalty(model),
-                -model["est_vram_gb"] if role in high_quality_roles else model["est_vram_gb"],
+        def priority_score(model: Dict) -> tuple:
+            slot_mem = self._slot_memory_gb(model, num_ctx)
+            fits_in_gpu = (slot_mem <= gpu_budget)
+            tier = 0 if fits_in_gpu else 1
+            quality_metric = -model["est_vram_gb"] if role in high_quality_roles else model["est_vram_gb"]
+            
+            real_gpu_penalty = False
+            if gpu_info.get("available"):
+                model_name = model["name"]
+                resident_gb = float(resident_vram.get(model_name, 0.0) or 0.0)
+                additional_gb = max(0.0, slot_mem - resident_gb)
+                if additional_gb > gpu_info["free_gb"]:
+                    real_gpu_penalty = True
+                    
+            return (
+                tier,
+                real_gpu_penalty,
+                quality_metric,
                 -(self._model_context_length(model) or 0) if role in high_quality_roles else 0,
                 self.usage_counter.get(model["name"], 0),
                 model["name"]
             )
-        )
+
+        return sorted(valid, key=priority_score)
 
     def get_role_escalation_path(self, role: str, num_ctx: int) -> List[Dict]:
         """
@@ -1230,9 +1259,11 @@ class DynamicModelPool:
                                     with self.cond:
                                         worker = self.active_workers.get(worker_id)
                                         if worker:
+                                            if tokens >= worker["estimated_output_tokens"]:
+                                                worker["estimated_output_tokens"] = int(tokens * 1.25) + 128
                                             worker["tokens"] = tokens
                                             worker["progress_pct"] = min(
-                                                95, int(tokens / estimated_output_tokens * 100)
+                                                95, int(tokens / worker["estimated_output_tokens"] * 100)
                                             )
                                     self._save_worker_status()
                                     if on_token:
@@ -1380,3 +1411,4 @@ class DynamicModelPool:
                             else previous_rate * 0.7 + measured_rate * 0.3
                         )
                 self.release_slot(worker_id)
+
