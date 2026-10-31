@@ -1,5 +1,5 @@
 # 🌐 本地全能企業 (Local Omnipotent Autonomous AI Enterprise)
-
+<img width="1917" height="867" alt="螢幕擷取畫面 2026-10-31 120256" src="https://github.com/user-attachments/assets/d1d26b86-53a3-4522-be8d-acfa0d2a9861" />
 > **Documentation Language / 文件語言**
 >
 > This documentation provides complete, mirrored guides in both **Traditional Chinese (繁體中文)** and **English**.
