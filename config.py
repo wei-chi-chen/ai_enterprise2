@@ -25,6 +25,9 @@ DEFAULT_RAM_BUDGET_GB = 16.0
 DEFAULT_MAX_MEMORY_GB = DEFAULT_GPU_BUDGET_GB + DEFAULT_RAM_BUDGET_GB
 OLLAMA_API_URL = "http://localhost:11434"
 
+# 雲端模型切換設定檔
+CLOUD_CONFIG_FILE = EMPLOYEE_ZONE / ".cloud_config.json"
+
 for p in [
     EMPLOYEE_ZONE, TASK_ZONE, DELIVERY_ZONE, HISTORY_ZONE,
     FEEDBACK_DIR, UPLOAD_DIR,
@@ -56,3 +59,9 @@ for f in [BACKLOG_FILE, LESSONS_FILE]:
     if not f.exists():
         f.write_text("[]", encoding="utf-8")
 
+if not CLOUD_CONFIG_FILE.exists():
+    CLOUD_CONFIG_FILE.write_text(json.dumps({
+        "use_cloud": False,
+        "google_api_key": "",
+        "rate_limit_url": ""
+    }, indent=2), encoding="utf-8")

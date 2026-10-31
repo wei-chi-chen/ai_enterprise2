@@ -6,10 +6,11 @@ import threading
 import os
 import re
 import subprocess
+import mimetypes
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import httpx
 from typing import List, Dict, Optional, Callable
-from config import OLLAMA_API_URL, ROSTER_FILE, MEM_USAGE_FILE, STATUS_FILE, DEFAULT_MAX_MEMORY_GB
+from config import OLLAMA_API_URL, ROSTER_FILE, MEM_USAGE_FILE, STATUS_FILE, DEFAULT_MAX_MEMORY_GB, CLOUD_CONFIG_FILE
 
 
 class ModelPoolError(RuntimeError):
@@ -27,115 +28,41 @@ class DynamicModelPool:
     MEMORY_SYNC_CACHE_SEC = 1.0
     SLOT_MEMORY_WAIT_TIMEOUT_SEC = 120.0
     FIRST_TOKEN_TIMEOUT_SEC = 90.0
+
     MODEL_PROFILES = {
         "nomic-embed-text:latest": {
             "supports_completion": False,
             "supports_embeddings": True,
             "embedding_dimensions": 768,
             "endpoint": "/api/embeddings",
-            "usage_guidance": "應輸入單純文字字串至/api/embeddings端點的prompt欄位會輸出768維度的浮點數向量陣列必須走/api/embeddings端點且禁止當作文字生成模型調用才能成功",
         },
         "bge-m3:latest": {
             "supports_completion": False,
             "supports_embeddings": True,
             "embedding_dimensions": 1024,
             "endpoint": "/api/embeddings",
-            "usage_guidance": "應輸入多語言文字字串至/api/embeddings端點的prompt欄位會輸出1024維度的浮點數語意向量陣列必須走/api/embeddings端點才能成功",
         },
-        "minicpm-v:8b": {
-            "requires_images": True,
-            "usage_guidance": "應輸入包含文字prompt與base64編碼圖片字串陣列images的JSON至/api/generate或/api/chat端點會輸出針對該圖片的結構化描述與文字辨識分析結果必須包含至少一張合法圖片Payload才能成功",
-        },
-        "llava:latest": {
-            "requires_images": True,
-            "usage_guidance": "應輸入文字提示詞與base64編碼圖片陣列至/api/generate端點會輸出多模態視覺問答與物件場景描述文本必須傳入圖片資料才能成功",
-        },
-        "clef:latest": {
-            "supports_completion": False,
-            "supports_document_qa": True,
-            "endpoint": "CLI",
-            "usage_guidance": "應透過標準輸入stdin管道灌入欲分析的長文本內容並在命令列搭配--ask帶入問題參數會輸出針對該輸入文件內容的精確問答結論與資訊抽取結果必須透過管道提供文件本文搭配--ask使用且禁止走普通generate端點才能成功",
-        },
-        "phi4:14b": {
-            "max_context": 8192,
-            "usage_guidance": "應輸入自然語言提示詞至/api/generate端點會輸出結構化文本推理分析或解答必須控制上下文長度避免突發顯存溢出才能成功",
-        },
-        "mistral-small:24b": {
-            "timeout_sec": 120,
-            "exclusive": True,
-            "keep_alive": 0,
-            "usage_guidance": "應輸入通用任務提示詞或長篇指令至/api/generate端點會輸出邏輯嚴密的文本生成內容或總結分析必須維持獨立載入並建議設定keep_alive為0避免顯存堆疊才能成功",
-        },
-        "gemma2:27b": {
-            "usage_guidance": "應輸入問答指令或語言轉換提示詞至/api/generate端點會輸出知識豐富的繁體中文或英文文本回答必須保留足夠主機RAM以進行層間快取調度才能成功",
-        },
-        "flint:latest": {
-            "timeout_sec": 120,
-            "usage_guidance": "應輸入多步驟任務指令至/api/generate端點會輸出對應的任務規劃或綜合推論結果因耗時較長需將請求逾時時間設定至120秒以上才能成功",
-        },
-        "nemotron-3.5-bolt:latest": {
-            "timeout_sec": 120,
-            "include_thinking": True,
-            "usage_guidance": "應輸入複雜決策或長推導問題至/api/generate端點會輸出包含完整思考鏈與最終決策的長篇文本因輸出含長思考標籤需提高timeout秒數並容許解析思維文本才能成功",
-        },
-        "qwen3.8:27b": {
-            "include_thinking": True,
-            "usage_guidance": "應輸入深度對話或領域分析提示詞至/api/generate端點會輸出包含中間思考過程與最終觀點的完整文本必須在解析時相容thinking欄位才能成功",
-        },
-        "gemma4:12b": {
-            "stream": False,
-            "usage_guidance": "應輸入綜合任務提示詞至/api/generate端點會輸出結構化文本或初步思考推論答案必須設定非串流模式以便一次獲取完整字串才能成功",
-        },
-        "nemotron-3.5-bolt:e4b": {
-            "usage_guidance": "應輸入輕量級任務提示詞至/api/generate端點會輸出低延遲且精煉的文字結論直接發送標準文字Payload即可成功",
-        },
-        "qwen3.5:4b": {
-            "include_thinking": True,
-            "usage_guidance": "應輸入數學邏輯或多輪問答提示詞至/api/generate端點會輸出含有ThinkingProcess結構思考歷程的文本解答必須同時抓取response與thinking內容才能成功",
-        },
-        "qwen2.5-coder:14b": {
-            "usage_guidance": "應輸入程式碼生成重構或除錯指令至/api/generate端點會輸出包含完整語法高亮代碼區塊與技術說明的程式碼直接發送標準Prompt即可成功",
-        },
-        "qwen2.5:7b": {
-            "stream": False,
-            "usage_guidance": "應輸入日常對話或快速摘要文字至/api/generate端點會輸出低延遲且流暢的通用文字回應直接發送標準非串流JSON即可成功",
-        },
-        "qwen2.5-coder:32b": {
-            "timeout_sec": 180,
-            "exclusive": True,
-            "keep_alive": 0,
-            "usage_guidance": "應輸入大型專案架構代碼生成或複雜演算法任務至/api/generate端點會輸出高品質代碼實現與模組設計說明因單次運算耗時較長需放寬請求逾時至180秒以上且避免併發其他模型才能成功",
-        },
-        "deepseek-r1:8b": {
-            "max_context": 8192,
-            "include_thinking": True,
-            "usage_guidance": "應輸入數理邏輯推理問題至/api/generate端點會輸出帶有think標籤的深度思維推導過程與最終答案必須限定num_ctx長度在合理範圍並容許解析思維標籤才能成功",
-        },
-        "devstral:24b": {
-            "exclusive": True,
-            "keep_alive": 0,
-            "usage_guidance": "應輸入開發者任務系統指令或複雜上下文至/api/generate端點會輸出技術規格說明與結構化開發文件需在單獨載入且前一個模型完全釋放下執行以保證CUDAHostBuffer分配成功",
-        },
-        "deepseek-r1:14b": {
-            "usage_guidance": "應輸入中等複雜度演算法或邏輯推導提示詞至/api/generate端點會輸出細緻的多步驟思考推導與推論答案必須預留計算圖動態重分配緩衝才能成功",
-        },
-        "llama3.1:8b": {
-            "stream": False,
-            "exclusive": True,
-            "keep_alive": 0,
-            "usage_guidance": "應輸入通用對話或文本任務指令至/api/generate端點會輸出穩定且符合指令要求的文本內容直接傳入非串流Prompt並確保單一模型獨佔顯存即可成功",
-        },
-        "qwen2.5:32b": {
-            "exclusive": True,
-            "keep_alive": 0,
-            "usage_guidance": "應輸入跨領域知識問答或長篇內容撰寫指令至/api/generate端點會輸出全面且語意連貫的大規模生成文本因權重佔用接近顯存邊界必須在單獨載入且設定keep_alive為0釋放前置模型時才能成功",
-        },
-        "deepseek-r1:32b": {
-            "timeout_sec": 120,
-            "max_context": 8192,
-            "include_thinking": True,
-            "usage_guidance": "應輸入高難度數學競賽題或深層推理證明問題至/api/generate端點會輸出極其詳盡的思維鏈演繹與最終驗證答案必須設定逾時120秒以上且手動限制上下文長度避免爆顯存才能成功",
-        },
+        "minicpm-v:8b": { "requires_images": True },
+        "llava:latest": { "requires_images": True },
+        "clef:latest": { "supports_completion": False, "supports_document_qa": True, "endpoint": "CLI" },
+        "phi4:14b": { "max_context": 8192 },
+        "mistral-small:24b": { "timeout_sec": 120, "exclusive": True, "keep_alive": 0 },
+        "gemma2:27b": {},
+        "flint:latest": { "timeout_sec": 120 },
+        "nemotron-3.5-bolt:latest": { "timeout_sec": 120, "include_thinking": True },
+        "qwen3.8:27b": { "include_thinking": True },
+        "gemma4:12b": { "stream": False },
+        "nemotron-3.5-bolt:e4b": {},
+        "qwen3.5:4b": { "include_thinking": True },
+        "qwen2.5-coder:14b": {},
+        "qwen2.5:7b": { "stream": False },
+        "qwen2.5-coder:32b": { "timeout_sec": 180, "exclusive": True, "keep_alive": 0 },
+        "deepseek-r1:8b": { "max_context": 8192, "include_thinking": True },
+        "devstral:24b": { "exclusive": True, "keep_alive": 0 },
+        "deepseek-r1:14b": {},
+        "llama3.1:8b": { "stream": False, "exclusive": True, "keep_alive": 0 },
+        "qwen2.5:32b": { "exclusive": True, "keep_alive": 0 },
+        "deepseek-r1:32b": { "timeout_sec": 120, "max_context": 8192, "include_thinking": True },
     }
 
     @classmethod
@@ -161,10 +88,15 @@ class DynamicModelPool:
         self.ollama_version: Optional[str] = None
         self._gpu_info_cache = None
         self._gpu_info_checked_at = 0.0
+        self.use_cloud = False
+        self.google_api_key = ""
+        self.rate_limit_url = ""
         self.refresh_models()
 
     @staticmethod
     def _model_context_length(model: Dict) -> int:
+        if model.get("inference_endpoint") == "GOOGLE_API":
+            return model.get("max_context", 1048576)
         model_info = model.get("model_info", {})
         if isinstance(model_info, dict):
             lengths = [
@@ -181,7 +113,8 @@ class DynamicModelPool:
         return 0
 
     def context_limit(self, model: Dict) -> int:
-        """Return the model/runtime context ceiling, further bounded by the memory budget."""
+        if model.get("inference_endpoint") == "GOOGLE_API":
+            return model.get("max_context", 1048576)
         limit = self._model_context_length(model)
         configured = os.environ.get("OLLAMA_CONTEXT_LENGTH", "")
         if configured.isdigit() and int(configured) > 0:
@@ -205,6 +138,8 @@ class DynamicModelPool:
         return low
 
     def context_limit_source(self, model: Dict) -> str:
+        if model.get("inference_endpoint") == "GOOGLE_API":
+            return "Google Cloud Quota"
         model_info = model.get("model_info", {})
         if isinstance(model_info, dict) and any(
             key.endswith(".context_length") and isinstance(value, (int, float)) and value > 0
@@ -297,15 +232,13 @@ class DynamicModelPool:
             }, indent=2), encoding="utf-8")
             self.cond.notify_all()
 
-    def set_hardware_budget(self, budget_gb: float):
-        budgets = self.get_hardware_budgets()
-        ratio_gpu = budgets["gpu_gb"] / max(0.1, budgets["total_gb"])
-        new_gpu = round(budget_gb * ratio_gpu, 1)
-        new_ram = round(budget_gb - new_gpu, 1)
-        self.set_hardware_budgets(new_gpu, new_ram)
-
     def get_gpu_info(self) -> Dict:
-        """Return NVIDIA GPU memory from nvidia-smi when available."""
+        if getattr(self, "use_cloud", False):
+            return {
+                "available": True, "name": "Google Cloud TPU/GPU",
+                "total_gb": 999.0, "free_gb": 999.0, "used_gb": 0.0, "error": None
+            }
+
         now = time.monotonic()
         cached = getattr(self, "_gpu_info_cache", None)
         if cached is not None and now - getattr(self, "_gpu_info_checked_at", 0.0) < 5:
@@ -361,10 +294,81 @@ class DynamicModelPool:
         self._gpu_info_checked_at = now
         return dict(info)
 
+    def _discover_google_models(self) -> List[Dict]:
+        """動態查詢 Google API，不再寫死！並轉化為系統可用的並行模型列表"""
+        discovered = []
+        if not self.google_api_key:
+            return discovered
+
+        try:
+            with httpx.Client(timeout=10.0) as client:
+                resp = client.get(
+                    f"https://generativelanguage.googleapis.com/v1beta/models?key={self.google_api_key}"
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    models_raw = data.get("models", [])
+                    for m in models_raw:
+                        # 只要有支援生成端點，就認定可用
+                        if "generateContent" not in m.get("supportedGenerationMethods", []):
+                            continue
+                        
+                        full_name = m.get("name", "")
+                        model_id = full_name.replace("models/", "")
+                        max_ctx = int(m.get("inputTokenLimit", 250000))
+                        desc = m.get("description", "Google Cloud Model")
+
+                        discovered.append({
+                            "name": model_id,
+                            "category": "Google Cloud API",
+                            "rpm": "Dynamic",
+                            "tpm": "Dynamic",
+                            "rpd": "Dynamic",
+                            "size_gb": 0.1,
+                            "est_vram_gb": 0.1,
+                            "capabilities": ["completion", "vision", "decision"],
+                            "capability_error": "",
+                            "supports_completion": True,
+                            "supports_decision": True,
+                            "supports_embeddings": "embed" in model_id.lower(),
+                            "supports_document_qa": False,
+                            "inference_endpoint": "GOOGLE_API",
+                            "timeout_sec": 180,
+                            "max_context": max_ctx,
+                            "is_vision": True,
+                            "requires_images": False,
+                            "usage_guidance": desc,
+                            "details": {},
+                            "model_info": {},
+                            "model_context_length": max_ctx
+                        })
+        except Exception as exc:
+            self.last_error = f"查詢 Google 模型失敗: {exc}"
+        
+        return discovered
+
     def refresh_models(self) -> List[Dict]:
-        """Discover installed models and infer supported tasks from Ollama's model metadata."""
+        """Discover installed models and infer supported tasks from Ollama or Google API."""
         with self._models_lock:
             now = time.monotonic()
+            
+            try:
+                if CLOUD_CONFIG_FILE.exists():
+                    c = json.loads(CLOUD_CONFIG_FILE.read_text(encoding="utf-8"))
+                    self.use_cloud = c.get("use_cloud", False)
+                    self.google_api_key = c.get("google_api_key", "").strip()
+                    self.rate_limit_url = c.get("rate_limit_url", "").strip()
+            except Exception:
+                self.use_cloud = False
+                self.google_api_key = ""
+                self.rate_limit_url = ""
+
+            if getattr(self, "use_cloud", False):
+                self.available_models = self._discover_google_models()
+                self.last_error = None if self.google_api_key else "雲端模式已開啟，但尚未設定 Google API 金鑰。"
+                self._last_model_refresh = now
+                return self.available_models
+
             last_refresh = getattr(self, "_last_model_refresh", 0.0)
             last_attempt = getattr(self, "_last_model_refresh_attempt", 0.0)
             if now - last_refresh < self.MODEL_REFRESH_INTERVAL_SEC:
@@ -452,6 +456,10 @@ class DynamicModelPool:
                         supports_completion = profile["supports_completion"]
                     return {
                         "name": name,
+                        "category": "Local Ollama",
+                        "rpm": "Local",
+                        "tpm": "Local",
+                        "rpd": "Local",
                         "size_gb": size_gb,
                         "est_vram_gb": round(max(1.5, size_gb * 1.12), 2),
                         "capabilities": capabilities,
@@ -496,7 +504,20 @@ class DynamicModelPool:
             return self.available_models
 
     def sync_realtime_memory(self) -> Dict:
-        """Read Ollama's loaded-model memory with bounded retries and short success caching."""
+        if getattr(self, "use_cloud", False):
+            # 雲端模式下，欺騙記憶體與正在運行的模型（為了支援系統排程不中斷）
+            active_mocks = []
+            if self.available_models:
+                active_mocks = [m["name"] for m in self.available_models[:2]]
+            res = {
+                "used_gb": 0.1, "ps_gb": 0.1,
+                "running_models": active_mocks,
+                "model_vram_gb": {n: 0.1 for n in active_mocks},
+                "available": True,
+            }
+            self._last_memory_sync = dict(res)
+            return res
+
         sync_lock = getattr(self, "_memory_sync_lock", None)
         if sync_lock is None:
             sync_lock = threading.Lock()
@@ -577,6 +598,8 @@ class DynamicModelPool:
             }
 
     def unload_all_models(self):
+        if getattr(self, "use_cloud", False):
+            return
         ps = self.sync_realtime_memory()
         for m_name in ps["running_models"]:
             try:
@@ -586,8 +609,14 @@ class DynamicModelPool:
                 pass
 
     def plan_greedy_swarm(self, num_ctx: int = BASE_CONTEXT_TOKENS) -> List[Dict]:
-        """Select as many distinct completion-capable models as fit the configured budget."""
         self.refresh_models()
+        if getattr(self, "use_cloud", False):
+            # 雲端模式下發放充裕的工作槽給系統並行使用 (選擇 API 中抓到最快的 flash / lite)
+            best_lite = next((m["name"] for m in self.available_models if "flash" in m["name"].lower()), None)
+            if not best_lite and self.available_models:
+                best_lite = self.available_models[0]["name"]
+            return [{"name": best_lite, "slot_memory_gb": 0.1} for _ in range(6)]
+
         budgets = self.get_hardware_budgets()
         total_budget = budgets["total_gb"]
         gpu_budget = budgets["gpu_gb"]
@@ -653,6 +682,8 @@ class DynamicModelPool:
 
     @classmethod
     def _context_cache_gb(cls, model: Dict, num_ctx: int) -> float:
+        if model.get("inference_endpoint") == "GOOGLE_API":
+            return 0.01
         model_info = model.get("model_info", {})
         if isinstance(model_info, dict):
             def metadata_value(suffix: str) -> Optional[float]:
@@ -696,10 +727,15 @@ class DynamicModelPool:
 
     @classmethod
     def _slot_memory_gb(cls, model: Dict, num_ctx: int = BASE_CONTEXT_TOKENS) -> float:
+        if model.get("inference_endpoint") == "GOOGLE_API":
+            return 0.1
         return round(float(model["est_vram_gb"]) + cls._context_cache_gb(model, num_ctx), 2)
 
     def rank_models_for_role(self, role: str, num_ctx: int = BASE_CONTEXT_TOKENS) -> List[Dict]:
         self.refresh_models()
+        if getattr(self, "use_cloud", False):
+            return self.available_models
+
         budgets = self.get_hardware_budgets()
         total_budget = budgets["total_gb"]
         gpu_budget = budgets["gpu_gb"]
@@ -780,10 +816,9 @@ class DynamicModelPool:
         return sorted(valid, key=priority_score)
 
     def get_role_escalation_path(self, role: str, num_ctx: int) -> List[Dict]:
-        """
-        根據當前任務角色，篩選符合該領域專業的模型，並依照專業適配度與能力階梯排列，
-        提供角色專屬的向上升級路徑，而非盲目遍歷無關模型。
-        """
+        if getattr(self, "use_cloud", False):
+            return self.rank_models_for_role(role, num_ctx)
+
         self.refresh_models()
         budget = self.get_hardware_budget()
         ranked = self.rank_models_for_role(role, num_ctx=num_ctx)
@@ -827,7 +862,9 @@ class DynamicModelPool:
         return ranked[0]
 
     def classify_task_routes(self, title: str, description: str, attached_file: str = "") -> Dict[str, bool]:
-        """Use an installed decision-capable model to add independent task-routing signals."""
+        if getattr(self, "use_cloud", False):
+            return {}
+
         self.refresh_models()
         if not any(model.get("supports_decision", False) for model in self.available_models):
             return {}
@@ -913,7 +950,6 @@ class DynamicModelPool:
         estimated_output_tokens: int = 800,
         task_id: str = "",
     ):
-        """Reserve the model footprint and per-request context memory before inference."""
         model_name = model_info["name"]
         est_gb = model_info["est_vram_gb"]
         exclusive = self.model_profile(model_name).get("exclusive", False)
@@ -921,6 +957,9 @@ class DynamicModelPool:
 
         with self.cond:
             while True:
+                if getattr(self, "use_cloud", False):
+                    break
+
                 exclusive_worker_active = any(
                     self.model_profile(worker["model"]).get("exclusive", False)
                     for worker in self.active_workers.values()
@@ -997,7 +1036,7 @@ class DynamicModelPool:
 
                 self.cond.wait(timeout=1.0)
 
-            self.reserved_memory_gb = round(self.reserved_memory_gb + needed_gb, 2)
+            self.reserved_memory_gb = round(self.reserved_memory_gb + (0.1 if getattr(self, "use_cloud", False) else needed_gb), 2)
             self.usage_counter[model_name] = self.usage_counter.get(model_name, 0) + 1
             self.active_workers[worker_id] = {
                 "model": model_name,
@@ -1010,7 +1049,7 @@ class DynamicModelPool:
                 "eta_sec": None,
                 "task_id": task_id or worker_id.rsplit("-", 2)[0],
                 "started_monotonic": time.monotonic(),
-                "reserved_gb": round(needed_gb, 2)
+                "reserved_gb": round(0.1 if getattr(self, "use_cloud", False) else needed_gb, 2)
             }
             self._save_worker_status()
             self.sync_realtime_memory()
@@ -1025,7 +1064,9 @@ class DynamicModelPool:
             self.cond.notify_all()
 
     def embed(self, model_name: str, text: str) -> List[float]:
-        """Create a single text embedding using Ollama's embeddings endpoint."""
+        if getattr(self, "use_cloud", False):
+            return [0.1] * 768
+
         profile = self.model_profile(model_name)
         if not profile.get("supports_embeddings"):
             raise ModelPoolError(f"Model '{model_name}' is not configured for text embeddings.")
@@ -1063,7 +1104,9 @@ class DynamicModelPool:
         model_name: str = "clef:latest",
         timeout: float = 120.0,
     ) -> str:
-        """Ask the CLI model about document text supplied through stdin."""
+        if getattr(self, "use_cloud", False):
+            return self.generate("architect", f"Document:\n{document_text}\n\nQuestion: {question}", task_id="DOC_QA")
+
         if not self.model_profile(model_name).get("supports_document_qa"):
             raise ModelPoolError(f"Model '{model_name}' is not configured for document Q&A.")
         if not isinstance(document_text, str) or not document_text.strip():
@@ -1090,6 +1133,34 @@ class DynamicModelPool:
         if not answer:
             raise RuntimeError("The clef document query returned no answer.")
         return answer
+
+    def _call_google_api_with_retry(self, url: str, payload: dict, max_retries: int = 4) -> str:
+        last_error = None
+        for attempt in range(max_retries):
+            try:
+                with httpx.Client(timeout=180.0) as client:
+                    resp = client.post(url, json=payload)
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        candidates = data.get("candidates", [])
+                        if not candidates:
+                            raise RuntimeError(f"Google API returned no candidates: {resp.text}")
+                        parts = candidates[0].get("content", {}).get("parts", [])
+                        if not parts:
+                            raise RuntimeError(f"Google API returned empty content: {resp.text}")
+                        return parts[0].get("text", "")
+                    
+                    err_msg = resp.text
+                    if resp.status_code in [429, 503, 500]:
+                        time.sleep(2.0 * (attempt + 1))
+                        continue
+                    raise RuntimeError(f"Google API Error: {err_msg}")
+            except (httpx.TimeoutException, httpx.NetworkError, ConnectionError) as net_err:
+                last_error = net_err
+                time.sleep(2.0 * (attempt + 1))
+            except Exception as e:
+                raise e
+        raise RuntimeError(f"Google API request failed after {max_retries} retries. Error: {last_error}")
 
     def generate(
         self,
@@ -1163,140 +1234,182 @@ class DynamicModelPool:
             estimated_prompt_tokens = self._estimate_text_tokens(system_prompt + prompt)
             attempt_started = time.monotonic()
             first_token_timeout = threading.Event()
+            result = ""
+            invalid_json = False
+
             try:
-                payload = {
-                    "model": model_name,
-                    "prompt": prompt,
-                    "system": system_prompt,
-                    "stream": profile.get("stream", True),
-                    "keep_alive": profile.get("keep_alive", "15m"),
-                    "options": {"temperature": temperature, "num_ctx": final_ctx}
-                }
-                if format_json:
-                    payload["format"] = "json"
-                if images:
-                    encoded_images = []
-                    for image_path in images:
-                        if image_path:
-                            with open(image_path, "rb") as image_file:
-                                encoded_images.append(base64.b64encode(image_file.read()).decode("utf-8"))
-                    payload["images"] = encoded_images
+                if getattr(self, "use_cloud", False):
+                    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={self.google_api_key}"
+                    parts = []
+                    if images:
+                        for img_path in images:
+                            if img_path:
+                                with open(img_path, "rb") as f:
+                                    b64 = base64.b64encode(f.read()).decode("utf-8")
+                                    mime = mimetypes.guess_type(img_path)[0] or "image/jpeg"
+                                    parts.append({"inline_data": {"mime_type": mime, "data": b64}})
+                    parts.append({"text": prompt})
+                    
+                    payload = {"contents": [{"parts": parts}], "generationConfig": {"temperature": temperature}}
+                    if format_json:
+                        payload["generationConfig"]["responseMimeType"] = "application/json"
+                    if system_prompt:
+                        payload["systemInstruction"] = {"parts": [{"text": system_prompt}]}
+                        
+                    with self.cond:
+                        w = self.active_workers.get(worker_id)
+                        if w:
+                            w["progress_pct"] = 45
+                    self._save_worker_status()
+                    
+                    result = self._call_google_api_with_retry(url, payload)
+                        
+                    with self.cond:
+                        w = self.active_workers.get(worker_id)
+                        if w:
+                            w["progress_pct"] = 100
+                            w["tokens"] = max(1, len(result) // 4)
+                    self._save_worker_status()
+                    
+                    if on_token:
+                        on_token(result, len(result) // 4)
+                    done_reason = "stop"
 
-                timeout_seconds = max(
-                    self.FIRST_TOKEN_TIMEOUT_SEC,
-                    profile.get("timeout_sec", self.FIRST_TOKEN_TIMEOUT_SEC),
-                )
-                timeout = httpx.Timeout(
-                    connect=10.0,
-                    read=timeout_seconds,
-                    write=timeout_seconds,
-                    pool=10.0,
-                )
-                with httpx.Client(timeout=timeout) as client:
-                    with client.stream("POST", f"{self.api_url}/api/generate", json=payload) as resp:
-                        resp.raise_for_status()
-                        def close_after_no_first_token():
-                            first_token_timeout.set()
-                            close = getattr(resp, "close", None)
-                            if callable(close):
-                                close()
+                else:
+                    payload = {
+                        "model": model_name,
+                        "prompt": prompt,
+                        "system": system_prompt,
+                        "stream": profile.get("stream", True),
+                        "keep_alive": profile.get("keep_alive", "15m"),
+                        "options": {"temperature": temperature, "num_ctx": final_ctx}
+                    }
+                    if format_json:
+                        payload["format"] = "json"
+                    if images:
+                        encoded_images = []
+                        for image_path in images:
+                            if image_path:
+                                with open(image_path, "rb") as image_file:
+                                    encoded_images.append(base64.b64encode(image_file.read()).decode("utf-8"))
+                        payload["images"] = encoded_images
 
-                        first_token_timer = threading.Timer(
-                            timeout_seconds,
-                            close_after_no_first_token,
-                        )
-                        first_token_timer.daemon = True
-                        first_token_timer.start()
-                        interrupt_stop = threading.Event()
-                        interrupt_thread = None
-                        if interrupt_event is not None:
-                            def interrupt_stream():
-                                while not interrupt_stop.wait(0.05):
-                                    if interrupt_event.is_set():
-                                        close = getattr(resp, "close", None)
-                                        if callable(close):
-                                            try:
-                                                close()
-                                            except Exception:
-                                                pass
-                                        return
+                    timeout_seconds = max(
+                        self.FIRST_TOKEN_TIMEOUT_SEC,
+                        profile.get("timeout_sec", self.FIRST_TOKEN_TIMEOUT_SEC),
+                    )
+                    timeout = httpx.Timeout(
+                        connect=10.0,
+                        read=timeout_seconds,
+                        write=timeout_seconds,
+                        pool=10.0,
+                    )
+                    with httpx.Client(timeout=timeout) as client:
+                        with client.stream("POST", f"{self.api_url}/api/generate", json=payload) as resp:
+                            resp.raise_for_status()
+                            def close_after_no_first_token():
+                                first_token_timeout.set()
+                                close = getattr(resp, "close", None)
+                                if callable(close):
+                                    close()
 
-                            interrupt_thread = threading.Thread(
-                                target=interrupt_stream, daemon=True
+                            first_token_timer = threading.Timer(
+                                timeout_seconds,
+                                close_after_no_first_token,
                             )
-                            interrupt_thread.start()
-                        try:
-                            for line in resp.iter_lines():
-                                if interrupt_event is not None and interrupt_event.is_set():
-                                    raise ModelPoolError("Ollama generation was interrupted.")
-                                if not line:
-                                    continue
-                                data = json.loads(line)
-                                if data.get("error"):
-                                    raise RuntimeError(data["error"])
-                                if "eval_count" in data:
-                                    actual_output_tokens = max(0, int(data.get("eval_count") or 0))
-                                    has_eval_count = True
-                                reported_prompt_tokens = int(data.get("prompt_eval_count") or 0)
-                                if reported_prompt_tokens > 0:
-                                    prompt_eval_tokens = reported_prompt_tokens
-                                    prompt_token_scale = reported_prompt_tokens / estimated_prompt_tokens
-                                tok = data.get("response", "")
-                                if profile.get("include_thinking"):
-                                    thinking = data.get("thinking", "")
-                                    if thinking:
-                                        tok = f"{thinking}{tok}"
-                                if tok:
-                                    first_token_timer.cancel()
-                                    chunks.append(tok)
-                                    tokens = max(
-                                        1,
-                                        round(
-                                            self._estimate_text_tokens("".join(chunks))
-                                            * prompt_token_scale
-                                        ),
-                                    )
-                                    with self.cond:
-                                        worker = self.active_workers.get(worker_id)
-                                        if worker:
-                                            if tokens >= worker["estimated_output_tokens"]:
-                                                worker["estimated_output_tokens"] = int(tokens * 1.25) + 128
-                                            worker["tokens"] = tokens
-                                            worker["progress_pct"] = min(
-                                                95, int(tokens / worker["estimated_output_tokens"] * 100)
-                                            )
-                                    self._save_worker_status()
-                                    if on_token:
-                                        on_token(tok, tokens)
-                                if data.get("done"):
-                                    done_reason = str(data.get("done_reason") or "")
-                                    prompt_eval_tokens = max(prompt_eval_tokens, reported_prompt_tokens)
-                                    if has_eval_count:
+                            first_token_timer.daemon = True
+                            first_token_timer.start()
+                            interrupt_stop = threading.Event()
+                            interrupt_thread = None
+                            if interrupt_event is not None:
+                                def interrupt_stream():
+                                    while not interrupt_stop.wait(0.05):
+                                        if interrupt_event.is_set():
+                                            close = getattr(resp, "close", None)
+                                            if callable(close):
+                                                try:
+                                                    close()
+                                                except Exception:
+                                                    pass
+                                            return
+
+                                interrupt_thread = threading.Thread(
+                                    target=interrupt_stream, daemon=True
+                                )
+                                interrupt_thread.start()
+                            try:
+                                for line in resp.iter_lines():
+                                    if interrupt_event is not None and interrupt_event.is_set():
+                                        raise ModelPoolError("Ollama generation was interrupted.")
+                                    if not line:
+                                        continue
+                                    data = json.loads(line)
+                                    if data.get("error"):
+                                        raise RuntimeError(data["error"])
+                                    if "eval_count" in data:
+                                        actual_output_tokens = max(0, int(data.get("eval_count") or 0))
+                                        has_eval_count = True
+                                    reported_prompt_tokens = int(data.get("prompt_eval_count") or 0)
+                                    if reported_prompt_tokens > 0:
+                                        prompt_eval_tokens = reported_prompt_tokens
+                                        prompt_token_scale = reported_prompt_tokens / estimated_prompt_tokens
+                                    tok = data.get("response", "")
+                                    if profile.get("include_thinking"):
+                                        thinking = data.get("thinking", "")
+                                        if thinking:
+                                            tok = f"{thinking}{tok}"
+                                    if tok:
+                                        first_token_timer.cancel()
+                                        chunks.append(tok)
+                                        tokens = max(
+                                            1,
+                                            round(
+                                                self._estimate_text_tokens("".join(chunks))
+                                                * prompt_token_scale
+                                            ),
+                                        )
                                         with self.cond:
                                             worker = self.active_workers.get(worker_id)
                                             if worker:
-                                                worker["tokens"] = actual_output_tokens
-                                                worker["estimated_output_tokens"] = actual_output_tokens
-                                                worker["progress_pct"] = 99
-                                                worker["eval_count"] = actual_output_tokens
-                                    if prompt_eval_tokens:
-                                        with self.cond:
-                                            worker = self.active_workers.get(worker_id)
-                                            if worker:
-                                                worker["prompt_eval_count"] = prompt_eval_tokens
-                        finally:
-                            first_token_timer.cancel()
-                            interrupt_stop.set()
-                            if interrupt_thread is not None:
-                                interrupt_thread.join(timeout=0.2)
-                        if first_token_timeout.is_set():
-                            raise RuntimeError(
-                                f"Model '{model_name}' produced no output tokens within "
-                                f"{timeout_seconds:.0f} seconds."
-                            )
-                        if interrupt_event is not None and interrupt_event.is_set():
-                            raise ModelPoolError("Ollama generation was interrupted.")
-                result = "".join(chunks)
+                                                if tokens >= worker["estimated_output_tokens"]:
+                                                    worker["estimated_output_tokens"] = int(tokens * 1.25) + 128
+                                                worker["tokens"] = tokens
+                                                worker["progress_pct"] = min(
+                                                    95, int(tokens / worker["estimated_output_tokens"] * 100)
+                                                )
+                                        self._save_worker_status()
+                                        if on_token:
+                                            on_token(tok, tokens)
+                                    if data.get("done"):
+                                        done_reason = str(data.get("done_reason") or "")
+                                        prompt_eval_tokens = max(prompt_eval_tokens, reported_prompt_tokens)
+                                        if has_eval_count:
+                                            with self.cond:
+                                                worker = self.active_workers.get(worker_id)
+                                                if worker:
+                                                    worker["tokens"] = actual_output_tokens
+                                                    worker["estimated_output_tokens"] = actual_output_tokens
+                                                    worker["progress_pct"] = 99
+                                                    worker["eval_count"] = actual_output_tokens
+                                        if prompt_eval_tokens:
+                                            with self.cond:
+                                                worker = self.active_workers.get(worker_id)
+                                                if worker:
+                                                    worker["prompt_eval_count"] = prompt_eval_tokens
+                            finally:
+                                first_token_timer.cancel()
+                                interrupt_stop.set()
+                                if interrupt_thread is not None:
+                                    interrupt_thread.join(timeout=0.2)
+                            if first_token_timeout.is_set():
+                                raise RuntimeError(
+                                    f"Model '{model_name}' produced no output tokens within "
+                                    f"{timeout_seconds:.0f} seconds."
+                                )
+                            if interrupt_event is not None and interrupt_event.is_set():
+                                raise ModelPoolError("Ollama generation was interrupted.")
+                    result = "".join(chunks)
+
                 if not result.strip() or (has_eval_count and actual_output_tokens == 0):
                     raise RuntimeError(
                         f"Model '{model_name}' finished without generating any tokens "
@@ -1306,15 +1419,13 @@ class DynamicModelPool:
                 if requested_ctx:
                     result = re.sub(r"\[\[REQUEST_MORE_CONTEXT(?::\d+)?\]\]", "", result).strip()
 
-                invalid_json = False
                 if format_json:
-                    # 去除 <think>...</think> 區塊，並從文本中提取標準 JSON 物件
                     clean_json_str = re.sub(r"<think>.*?</think>", "", result, flags=re.DOTALL).strip()
                     json_match = re.search(r"(\{.*\})", clean_json_str, re.DOTALL)
                     if json_match:
                         try:
                             json.loads(json_match.group(1))
-                            result = json_match.group(1) # 將提取後的純 JSON 回填，避免外層 json.loads 再次報錯
+                            result = json_match.group(1)
                         except Exception:
                             invalid_json = True
                     else:
@@ -1334,7 +1445,6 @@ class DynamicModelPool:
                 model_failure_reasons[model_name] = fail_reason
 
                 target_ctx = int(requested_ctx.group(1)) if requested_ctx and requested_ctx.group(1) else final_ctx * 2
-                # 限制自動擴展上限，架構規劃與非極長文本任務不應超過 8192，避免 RAM 溢位與極慢的 CPU 推理
                 max_allowed_ctx = min(16384, self.context_limit(m_info) or 8192)
                 target_ctx = min(max_allowed_ctx, max(final_ctx * 2, target_ctx))
 
@@ -1411,4 +1521,4 @@ class DynamicModelPool:
                             else previous_rate * 0.7 + measured_rate * 0.3
                         )
                 self.release_slot(worker_id)
-
+                

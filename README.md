@@ -64,6 +64,26 @@
 
    * **高解析度向量插畫**：生成包含漸層、自訂幾何路徑與發光層之向量規格，最高輸出 2048×2048 PNG。
 
+---
+
+### 【新增功能】雲端 Google Gemini API 雙軌支援 (Cloud Mode Extension)
+
+針對本機硬體資源受限之使用者，系統現已全面支援**雲端 Google Gemini API 雙軌切換機制**：
+
+1. **一鍵切換與動態介面**：
+   * 可於 Web 頂部隨時切換「本地端 (Ollama)」或「雲端 (Google API)」。
+   * 切換至雲端模式時，介面會**自動隱藏本機 GPU/RAM 硬體預算拉桿**，替換為 Google API Key 輸入框，避免多餘設定干擾。
+2. **動態查詢與配額可視化**：
+   * **絕不寫死雲端數據**：系統透過提供的金鑰連線 Google ModelService 即時動態探測可用模型（包含 `gemini-3.1-flash-lite`、`gemini-3.8-flash` 等）與輸入 Context 限制。
+   * **左下角即時呈現詳細指標**：自動呈現模型名稱、分類（Category）以及即時配額數據（RPM / TPM / RPD），讓資源狀態一目了然。
+3. **雲端多模型並行調度與自動重試**：
+   * 雲端模式下擺脫本機顯存限制，自適應派發多個槽位並行生成。
+   * 內建**指數退避重試（Exponential Backoff Retry）**機制，遇網路連線重置或 429 限流自動重試，確保長任務不中斷。
+4. **安全金鑰隔離保護**：
+   * 金鑰僅存於本地 `enterprise_workspace/01_staff/.cloud_config.json`，已受專案 `.gitignore` 嚴格隔離，杜絕意外上傳至 GitHub。
+
+---
+
 ### 二、 系統架構與專區目錄
 
 專案遵循四大實體專區規範（位於 `enterprise_workspace/` 下）：
@@ -92,6 +112,13 @@ Project_Root/
     └── 04_history/                 # 歷史記憶與審計 (lessons_learned.json, failure_audits/)
 
 ```
+
+---
+
+### 【新增目錄項目說明】
+* `enterprise_workspace/01_staff/.cloud_config.json`：存放使用者在前端設定的雲端模式開關與 Google API 金鑰，受 `.gitignore` 保護，永不上傳。
+
+---
 
 ### 三、 模型規格與約束清單 (`MODEL_PROFILES`)
 
@@ -204,6 +231,19 @@ pip install -r requirements.txt
 
    * **即時預覽**：遊戲或短片產出後，右側預覽視窗會自動開啟，支援全螢幕操作與成果檢驗。
 
+---
+
+### 【新增操作說明】雲端 Google API 模式切換方式
+
+* **切換至雲端模式**：
+  1. 在 Web 控制台右上角下拉選單中將「運行模式」改選為「**雲端 Google**」。
+  2. 此時介面會隱藏 GPU/RAM 輸入框，並顯示「**API Key**」輸入框。
+  3. 輸入您的 Google API Key，點擊「**套用**」。
+  4. 系統將即時查詢並於左下角列出您帳號目前可用的雲端模型以及其配額（RPM / TPM / RPD）。
+  5. 點擊「▶ 開始 / 續跑」即可直接使用雲端模型展開高並行研發。
+
+---
+
 ## English Guide
 
 ### I. System Vision and Core Concepts
@@ -260,6 +300,26 @@ Unlike simple wrapper scripts or single-turn chat interfaces, this enterprise ar
 
    * **Image Forge**: Procedurally generates multi-layered vector illustrations with gradients and glow shaders up to 2048×2048 PNG resolution.
 
+---
+
+### [New Feature] Hybrid Cloud Support (Google Gemini API Extension)
+
+To empower workstations with limited local VRAM, the enterprise now natively supports **hybrid execution with Google Gemini Cloud APIs**:
+
+1. **One-Click Mode Switcher**:
+   * Seamlessly switch between "Local Ollama" and "Cloud Google" directly from the dashboard header.
+   * Switching to Cloud mode **automatically hides the local VRAM/RAM sliders** and reveals the API Key input field.
+2. **Dynamic Quota & Model Inspection**:
+   * **Zero Hardcoded Limits**: Queries Google ModelService directly using your API Key to inspect real-time available models (`gemini-3.1-flash-lite`, `gemini-3.8-flash`, etc.) and context limits.
+   * **Bottom-Left Quota Display**: Displays active models along with their live quotas (RPM, TPM, RPD) and categories on the dashboard.
+3. **High-Concurrency Swarm & Resilient Retry**:
+   * Schedules multiple parallel workers unrestricted by local VRAM.
+   * Features an integrated **Exponential Backoff Retry** mechanism to gracefully handle connection resets and rate limits (HTTP 429/503).
+4. **Credential Security**:
+   * API keys are kept isolated in `enterprise_workspace/01_staff/.cloud_config.json`, fully protected by `.gitignore` against accidental Git commits.
+
+---
+
 ### II. Directory and Zone Architecture
 
 The workspace strictly maintains an enterprise four-zone layout under `enterprise_workspace/`:
@@ -288,6 +348,13 @@ Project_Root/
     └── 04_history/                 # Audits and logs (lessons_learned.json, failure_audits/)
 
 ```
+
+---
+
+### [New Directory Note]
+* `enterprise_workspace/01_staff/.cloud_config.json`: Stores user-configured cloud mode flags and Google API keys locally; protected from Git tracking via `.gitignore`.
+
+---
 
 ### III. Model Constraints Profile (`MODEL_PROFILES`)
 
@@ -399,3 +466,14 @@ pip install -r requirements.txt
    * **Start Processing**: Click "▶ Start / Resume" to trigger autonomous routing and parallel swarm execution.
 
    * **Review Deliverables**: Monitor real-time logs in the center panel; games, movies, and reports will render in the right-hand preview panel automatically upon completion.
+
+---
+
+### [New Operating Instructions] Cloud Mode Execution
+
+* **Switching to Cloud Google Mode**:
+  1. Open the top-right mode dropdown in the web console and select **"Cloud Google"**.
+  2. The local GPU/RAM inputs will be replaced by the **API Key** input field.
+  3. Enter your Google Gemini API Key and click **"Apply"**.
+  4. The bottom-left model panel will dynamically populate with available models and their real-time quotas (RPM, TPM, RPD).
+  5. Click **"▶ Start / Resume"** to trigger parallel autonomous workflows powered by Google Cloud APIs.

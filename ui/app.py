@@ -9,7 +9,7 @@ from urllib.parse import quote
 from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect, UploadFile, File, Form
 from fastapi.responses import HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
-from config import DELIVERY_ZONE, FEEDBACK_DIR, UPLOAD_DIR, BACKLOG_FILE
+from config import DELIVERY_ZONE, FEEDBACK_DIR, UPLOAD_DIR, BACKLOG_FILE, CLOUD_CONFIG_FILE
 from daemon import OmniEnterpriseDaemon
 
 app = FastAPI(title="本地全能企業")
@@ -53,7 +53,6 @@ async def allow_delivery_asset_fetch(request, call_next):
         response.headers["Access-Control-Allow-Headers"] = "*"
     return response
 
-
 def _next_task_id(tasks):
     task_ids = {
         task.get("task_id", "")
@@ -79,7 +78,6 @@ def _next_task_id(tasks):
     )
     next_number = max((int(task_id[5:]) for task_id in task_ids), default=0) + 1
     return f"TASK-{next_number:03d}"
-
 
 @app.on_event("startup")
 async def startup_event():
@@ -117,6 +115,13 @@ async def get_init_state():
         if film_viewer.exists():
             existing_film = f"/delivery/films/{last_tid}/index.html?t={int(time.time())}"
 
+    cloud_config = {"use_cloud": False, "google_api_key": ""}
+    if CLOUD_CONFIG_FILE.exists():
+        try:
+            cloud_config = json.loads(CLOUD_CONFIG_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+
     return {
         "models": models,
         "ollama_version": daemon.pool.ollama_version,
@@ -132,9 +137,9 @@ async def get_init_state():
         "existing_preview": existing_preview,
         "existing_preview_error": existing_preview_error,
         "existing_film": existing_film,
-        "existing_assets": existing_assets
+        "existing_assets": existing_assets,
+        "cloud_config": cloud_config
     }
-
 
 @app.get("/api/tasks/{task_id}/deliveries")
 async def get_task_deliveries(
@@ -147,10 +152,7 @@ async def get_task_deliveries(
         _get_task_deliveries_sync, task_id, offset, limit, search
     )
 
-
-def _get_task_deliveries_sync(
-    task_id: str, offset: int, limit: int, search: str
-):
+def _get_task_deliveries_sync(task_id: str, offset: int, limit: int, search: str):
     if not re.fullmatch(r"TASK-\d{3,}", task_id):
         raise HTTPException(status_code=400, detail="Invalid task ID.")
     categories = ("reports", "cleaned_data", "projects", "games", "films", "illustrations")
@@ -195,7 +197,6 @@ def _get_task_deliveries_sync(
         "next_offset": offset + len(page) if offset + len(page) < total else None,
     }
 
-
 @app.post("/api/config/memory")
 async def update_memory_budget(
     gpu_budget_gb: float = Form(..., ge=0.0, le=512),
@@ -225,6 +226,24 @@ async def update_memory_budget(
         "model_error": daemon.pool.last_error
     }
 
+@app.post("/api/config/mode")
+async def update_mode_config(
+    use_cloud: bool = Form(...),
+    google_api_key: str = Form("")
+):
+    config_data = {
+        "use_cloud": use_cloud,
+        "google_api_key": google_api_key
+    }
+    CLOUD_CONFIG_FILE.write_text(json.dumps(config_data, indent=2), encoding="utf-8")
+    
+    os.environ["USE_CLOUD_MODEL"] = "1" if use_cloud else "0"
+    if google_api_key:
+        os.environ["GOOGLE_API_KEY"] = google_api_key
+
+    mode_name = "雲端 (Google API)" if use_cloud else "本地端 (Ollama)"
+    daemon.emit_log("SYS", f"⚡ 系統模式已切換為：{mode_name}")
+    return {"status": "ok"}
 
 @app.post("/api/tasks/{task_id}/retry")
 async def retry_failed_task(task_id: str):
@@ -254,7 +273,6 @@ async def retry_failed_task(task_id: str):
             raise HTTPException(status_code=500, detail="Could not update the task backlog.") from exc
 
     return {"status": "pending", "task_id": task_id}
-
 
 @app.post("/api/daemon/control")
 async def control_daemon(action: str = Form(...)):
@@ -368,7 +386,6 @@ HTML_UI = """
   * { box-sizing: border-box; }
   html, body { width: 100%; height: 100vh; overflow: hidden; margin: 0; padding: 0; background: #090d16; color: #f1f5f9; font-family: 'Segoe UI', system-ui, -apple-system, sans-serif; display: flex; flex-direction: column; }
   
-  /* 頂部 Header：Flex 佈局，兩端貼齊，整體往右靠，絕無橫向捲軸 */
   header { 
     background: #1e293b; 
     padding: 6px 14px; 
@@ -441,7 +458,6 @@ HTML_UI = """
   .btn-stop { background: #dc2626; }
   .btn-lang { background: #475569; }
 
-  /* KPI 指標列：固定緊湊高度，防止佔據工作區域 */
   .kpi-bar { 
     display: grid; 
     grid-template-columns: repeat(5, minmax(0, 1fr)); 
@@ -455,22 +471,20 @@ HTML_UI = """
   .kpi-title { font-size: 11.5px; line-height: 1.2; color: #94a3b8; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .kpi-val { font-size: 16px; font-weight: bold; color: #38bdf8; margin-top: 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   
-  /* 任務與各自耗時：調小文字尺寸，支援整潔條列 */
   .active-task-times { display: flex; flex-direction: column; gap: 2px; font-size: 12px; font-weight: 500; color: #38bdf8; max-height: 42px; overflow-y: auto; }
   .active-task-time { overflow-wrap: anywhere; line-height: 1.25; font-size: 11.5px; }
 
   .prog-bg { width: 100%; height: 5px; background: #1e293b; border-radius: 3px; margin-top: 4px; overflow: hidden; }
   .prog-fill { height: 100%; background: #22c55e; width: 0%; transition: width 0.3s ease; }
 
-  /* 核心主容器：鎖定在視窗內，三欄各自滾動 */
-  .container { display: grid; grid-template-columns: 330px 1fr 460px; flex: 1; min-height: 0; overflow: hidden; }
+  .container { display: grid; grid-template-columns: 360px 1fr 430px; flex: 1; min-height: 0; overflow: hidden; }
   .col { padding: 10px; border-right: 1px solid #1e293b; display: flex; flex-direction: column; overflow-y: auto; gap: 8px; min-height: 0; }
   .col:last-child { border-right: none; }
   
   .card { background: #0f172a; border: 1px solid #1e293b; border-radius: 6px; padding: 8px 10px; }
   h3 { margin: 0 0 6px 0; font-size: 13px; color: #38bdf8; border-bottom: 1px solid #1e293b; padding-bottom: 4px; font-weight: 600; }
   
-  input[type="text"], textarea, input[type="number"], select { 
+  input[type="text"], textarea, input[type="number"], select, input[type="password"] { 
     width: 100%; 
     background: #020617; 
     border: 1px solid #334155; 
@@ -485,21 +499,48 @@ HTML_UI = """
   #log-stream { flex: 1; background: #020617; border: 1px solid #1e293b; border-radius: 6px; padding: 8px; overflow-y: auto; font-size: 12px; white-space: pre-wrap; min-height: 0; }
   .log-item { margin-bottom: 6px; border-bottom: 1px solid #0f172a; padding-bottom: 4px; font-family: ui-monospace, monospace; }
   
-  /* 精簡模型顯示標籤：只顯示可用模型名稱 */
-  .model-tag-grid { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 4px; max-height: 140px; overflow-y: auto; }
-  .model-clean-tag {
-    display: inline-flex;
-    align-items: center;
-    background: #1e293b;
+  .model-tag-grid { display: flex; flex-direction: column; gap: 6px; margin-top: 4px; max-height: 250px; overflow-y: auto; }
+  .model-detail-card {
+    background: #0b1120;
     border: 1px solid #334155;
-    color: #e2e8f0;
-    font-size: 11px;
-    font-weight: 500;
-    padding: 3px 7px;
-    border-radius: 4px;
-    user-select: none;
+    border-radius: 5px;
+    padding: 6px 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
   }
-  .model-clean-tag span { color: #22c55e; margin-right: 4px; font-weight: bold; }
+  .model-detail-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  .model-detail-name {
+    font-size: 11.5px;
+    font-weight: bold;
+    color: #38bdf8;
+  }
+  .model-detail-cat {
+    font-size: 10px;
+    background: #1e293b;
+    border: 1px solid #475569;
+    color: #94a3b8;
+    padding: 1px 4px;
+    border-radius: 3px;
+  }
+  .model-quota-metrics {
+    display: flex;
+    gap: 8px;
+    font-size: 10.5px;
+    color: #e2e8f0;
+  }
+  .model-quota-item span {
+    color: #64748b;
+    margin-right: 2px;
+  }
+  .model-quota-item b {
+    color: #22c55e;
+    font-weight: 600;
+  }
 
   .model-progress-card { background:#0f172a; border:1px solid #334155; border-radius:5px; padding:6px; margin-bottom:6px; }
   .model-progress-meta { display:flex; justify-content:space-between; gap:6px; font-size:10.5px; color:#cbd5e1; margin-top:4px; }
@@ -523,15 +564,14 @@ HTML_UI = """
   .task-retry { padding: 2px 6px; font-size: 10.5px; }
   .memory-update-status { max-width: 150px; white-space: normal; font-size: 10.5px; flex-shrink: 0; }
 
-  /* 視窗極限響應式支援 */
   @media (max-width: 1350px) {
     #context-live { display: none; }
-    .container { grid-template-columns: 300px 1fr 400px; }
+    .container { grid-template-columns: 330px 1fr 380px; }
   }
   @media (max-width: 1100px) {
     #gpu-live { display: none; }
     .kpi-bar { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-    .container { grid-template-columns: 280px 1fr 340px; }
+    .container { grid-template-columns: 310px 1fr 320px; }
   }
   @media (max-width: 850px) {
     html, body { height: auto; overflow: auto; }
@@ -549,11 +589,26 @@ HTML_UI = """
   </div>
   <div class="ctrl-group">
     <div class="mem-ctrl-group">
-      <span style="color:#38bdf8;font-weight:600;">GPU (GB):</span>
-      <input type="number" id="gpu-input" value="6.0" min="0" max="512" step="0.5" style="width:46px;margin:0;padding:2px 4px;font-size:11px;" />
-      <span style="color:#a78bfa;font-weight:600;">RAM (GB):</span>
-      <input type="number" id="ram-input" value="16.0" min="0" max="512" step="1.0" style="width:46px;margin:0;padding:2px 4px;font-size:11px;" />
-      <button class="btn btn-resume" onclick="applyMemory()" id="ui-btn-apply" data-i18n="apply" style="padding:3px 6px;font-size:11px;">套用</button>
+      <span style="color:#facc15;font-weight:600;">運行模式:</span>
+      <select id="run-mode" style="width:80px;margin:0;padding:2px 4px;font-size:11px;" onchange="toggleModeUI()">
+        <option value="local">本地 Ollama</option>
+        <option value="cloud">雲端 Google</option>
+      </select>
+      
+      <span id="google-api-container" style="display:none; align-items:center; gap:4px;">
+        <span style="color:#38bdf8;font-weight:600;">API Key:</span>
+        <input type="password" id="google-api-key" placeholder="AIzaSy..." style="width:110px;margin:0;padding:2px 4px;font-size:11px;" />
+      </span>
+
+      <!-- 本地端才顯示 GPU/RAM -->
+      <span id="local-config-group" style="display:inline-flex; align-items:center; gap:4px;">
+          <span style="color:#38bdf8;font-weight:600;margin-left:4px;">GPU(GB):</span>
+          <input type="number" id="gpu-input" value="6.0" min="0" max="512" step="0.5" style="width:46px;margin:0;padding:2px 4px;font-size:11px;" />
+          <span style="color:#a78bfa;font-weight:600;">RAM(GB):</span>
+          <input type="number" id="ram-input" value="16.0" min="0" max="512" step="1.0" style="width:46px;margin:0;padding:2px 4px;font-size:11px;" />
+      </span>
+
+      <button class="btn btn-resume" onclick="applyConfig()" id="ui-btn-apply" data-i18n="apply" style="padding:3px 6px;font-size:11px;">套用</button>
     </div>
     <span id="mem-update-status" class="memory-update-status" role="status" aria-live="polite"></span>
     <span id="mem-live" class="status-pill" style="color:#38bdf8;">VRAM: 0.0 / 40.0 GB</span>
@@ -640,9 +695,8 @@ HTML_UI = """
       <div id="fb-status" style="font-size:11px;color:#22c55e;margin-top:3px;"></div>
     </div>
 
-    <!-- 精簡後：僅顯示可用模型名稱清單 -->
     <div class="card">
-      <h3 id="ui-models-title" data-i18n="modelsTitle">🧠 可用模型清單</h3>
+      <h3 id="ui-models-title" data-i18n="modelsTitle">🧠 可用模型與配額 (RPM / TPM / RPD)</h3>
       <div id="model-status" role="status" style="font-size:11px;color:#fca5a5;"></div>
       <div id="model-list" class="model-tag-grid"></div>
     </div>
@@ -719,9 +773,9 @@ HTML_UI = """
       backlogTitle: '📋 任務佇列看板', loading: '載入中...',
       taskSearch: '搜尋任務...', allStatuses: '所有狀態', noMatchingTasks: '沒有符合條件的任務',
       retry: '重試', retrying: '重試中...', retryError: '重試失敗：',
-      memorySaved: '記憶體上限已更新。', memorySaveError: '記憶體上限更新失敗：',
-      memoryRefreshError: '記憶體更新成功但重繪失敗：',
-      invalidMemoryBudget: '請輸入 0.1–512 GB 數值。',
+      memorySaved: '設定已更新。', memorySaveError: '設定更新失敗：',
+      memoryRefreshError: '設定更新成功但重繪失敗：',
+      invalidMemoryBudget: '請輸入有效的數值。',
       previousPage: '上一頁', nextPage: '下一頁', pageOf: '第 {page} / {pages} 頁',
       deliverySearch: '搜尋交付檔案...',
       priorityLabel: '優先級 (-100–100)：',
@@ -734,7 +788,7 @@ HTML_UI = """
       iterationsLabel: '演化輪數：', fileLabel: '附加檔案 (圖檔 / CSV / 代碼)：',
       submitTask: '僅加入佇列', feedbackTitle: '💡 隨時注入新意見 (階段完成後讀取)',
       feedbackPlaceholder: '執行中或暫停時皆可輸入新要求...', sendFeedback: '送出意見',
-      modelsTitle: '🧠 可用模型清單',
+      modelsTitle: '🧠 可用模型與配額 (RPM / TPM / RPD)',
       capabilitiesUnavailable: '能力資訊不可用',
       modelsUnavailable: '無法使用模型：',
       memoryUnavailable: '記憶體用量不可讀：',
@@ -754,12 +808,12 @@ HTML_UI = """
       stage1: '階段 1：總架構師自主路由與任務拆解',
       stage2: '階段 2：多模態視覺感知解析',
       stage3: '階段 3：自動資料清理與沙盒驗證',
-      stageImage: '階段 3.5：多輪圖片設計與高解析繪製',
+      stageImage: '階段 3.5：多輪圖片設計與高解析度繪製',
       stage4: '階段 4：遊戲素材合成與全模型並行開發',
       stageGameEvolution: '階段 4.{round}：並行遊戲演化（{iteration}/{total}）',
       stage5: '階段 5：電影劇本、分鏡與動畫影片製作',
-      stage6: '階段 6：並行專案開發與 TDD 驗收',
-      stage62: '階段 6.2：沙盒 TDD 驗證與主管升級除錯',
+      stage6: '階段 6：滿載多模型並行專案開發與 TDD 驗收',
+      stage62: '階段 6.2：沙盒 TDD 驗證與三級主管升級除錯',
       stage63: '階段 6.3：最終回歸測試與交付封存',
       stage7: '階段 7：多模型並行稽核與報告交付',
       workersTitle: '⚡ 預算內可用的並行模型工作槽',
@@ -794,9 +848,9 @@ HTML_UI = """
       backlogTitle: '📋 Task Backlog', loading: 'Loading...',
       taskSearch: 'Search tasks...', allStatuses: 'All statuses', noMatchingTasks: 'No matching tasks',
       retry: 'Retry', retrying: 'Retrying...', retryError: 'Retry failed: ',
-      memorySaved: 'Budget updated.', memorySaveError: 'Budget update failed: ',
+      memorySaved: 'Config updated.', memorySaveError: 'Config update failed: ',
       memoryRefreshError: 'Refresh error: ',
-      invalidMemoryBudget: 'Input 0.1–512 GB.',
+      invalidMemoryBudget: 'Input valid numbers.',
       previousPage: 'Prev', nextPage: 'Next', pageOf: 'Page {page} / {pages}',
       deliverySearch: 'Search files...',
       priorityLabel: 'Priority (-100–100):',
@@ -809,7 +863,7 @@ HTML_UI = """
       iterationsLabel: 'Rounds:', fileLabel: 'Attachment (Image / CSV / Code):',
       submitTask: 'Queue Only', feedbackTitle: '💡 Inject Feedback (Read per stage)',
       feedbackPlaceholder: 'Add feedback while running or paused...', sendFeedback: 'Send',
-      modelsTitle: '🧠 Available Models',
+      modelsTitle: '🧠 Available Models & Quota (RPM / TPM / RPD)',
       workersTitle: '⚡ Swarm Slots within Budget',
       capabilitiesUnavailable: 'Capabilities unavailable',
       modelsUnavailable: 'Model unavailable:',
@@ -1021,21 +1075,47 @@ HTML_UI = """
     status.style.color = memoryUpdateResult?.isError ? '#fca5a5' : '#22c55e';
   }
 
-  /* 依需求修改：只顯示可用模型名稱標籤，過濾並隱藏細部資訊 */
+  /* 在左下角完整呈現 Model、Category、RPM、TPM、RPD 數據 */
   function renderModels(models) {
     const list = document.getElementById('model-list');
     const usableModels = (models || []).filter(model => 
       model.supports_completion || model.supports_decision || model.supports_embeddings || model.supports_document_qa
     );
     list.replaceChildren(...usableModels.map(model => {
-      const tag = document.createElement('div');
-      tag.className = 'model-clean-tag';
-      tag.title = model.name;
-      const check = document.createElement('span');
-      check.textContent = '✔';
-      const label = document.createTextNode(model.name);
-      tag.append(check, label);
-      return tag;
+      const card = document.createElement('div');
+      card.className = 'model-detail-card';
+
+      const header = document.createElement('div');
+      header.className = 'model-detail-header';
+
+      const name = document.createElement('span');
+      name.className = 'model-detail-name';
+      name.textContent = `✔ ${model.name}`;
+
+      const cat = document.createElement('span');
+      cat.className = 'model-detail-cat';
+      cat.textContent = model.category || 'Text-out models';
+
+      header.append(name, cat);
+
+      const metrics = document.createElement('div');
+      metrics.className = 'model-quota-metrics';
+
+      const rpm = document.createElement('div');
+      rpm.className = 'model-quota-item';
+      rpm.innerHTML = `<span>RPM:</span><b>${model.rpm || 'Local'}</b>`;
+
+      const tpm = document.createElement('div');
+      tpm.className = 'model-quota-item';
+      tpm.innerHTML = `<span>TPM:</span><b>${model.tpm || 'Local'}</b>`;
+
+      const rpd = document.createElement('div');
+      rpd.className = 'model-quota-item';
+      rpd.innerHTML = `<span>RPD:</span><b>${model.rpd || 'Local'}</b>`;
+
+      metrics.append(rpm, tpm, rpd);
+      card.append(header, metrics);
+      return card;
     }));
   }
 
@@ -1557,6 +1637,12 @@ HTML_UI = """
       document.getElementById('gpu-input').value = 6.0;
       document.getElementById('ram-input').value = Math.max(0, data.budget_gb - 6.0);
     }
+
+    if (data.cloud_config) {
+      document.getElementById('run-mode').value = data.cloud_config.use_cloud ? 'cloud' : 'local';
+      document.getElementById('google-api-key').value = data.cloud_config.google_api_key || '';
+      toggleModeUI();
+    }
     
     renderHardwareStatus(data);
     renderMemoryUsage(data.memory?.used_gb || 0, data.budget_gb);
@@ -1589,18 +1675,40 @@ HTML_UI = """
     }
   }
 
-  async function applyMemory() {
-    const gpuVal = Number(document.getElementById('gpu-input').value);
-    const ramVal = Number(document.getElementById('ram-input').value);
-    if (isNaN(gpuVal) || isNaN(ramVal) || (gpuVal + ramVal) <= 0) {
-      alert("請輸入有效的 GPU 與 RAM 預算（兩者總和須大於 0）");
-      return;
+  function toggleModeUI() {
+    const isCloud = document.getElementById('run-mode').value === 'cloud';
+    document.getElementById('google-api-container').style.display = isCloud ? 'inline-flex' : 'none';
+    document.getElementById('local-config-group').style.display = isCloud ? 'none' : 'inline-flex';
+  }
+
+  async function applyConfig() {
+    const isCloud = document.getElementById('run-mode').value === 'cloud';
+    const apiKey = document.getElementById('google-api-key').value.trim();
+    
+    let gpuVal = Number(document.getElementById('gpu-input').value);
+    let ramVal = Number(document.getElementById('ram-input').value);
+    
+    if (!isCloud) {
+        if (isNaN(gpuVal) || isNaN(ramVal) || (gpuVal + ramVal) <= 0) {
+          alert(tr('invalidMemoryBudget'));
+          return;
+        }
+    } else {
+        gpuVal = 6.0;
+        ramVal = 16.0;
     }
-    const fd = new FormData();
-    fd.append('gpu_budget_gb', String(gpuVal));
-    fd.append('ram_budget_gb', String(ramVal));
+
+    const fdMem = new FormData();
+    fdMem.append('gpu_budget_gb', String(gpuVal));
+    fdMem.append('ram_budget_gb', String(ramVal));
+
+    const fdMode = new FormData();
+    fdMode.append('use_cloud', isCloud ? 'true' : 'false');
+    fdMode.append('google_api_key', apiKey);
+
     try {
-      const response = await fetch('/api/config/memory', { method: 'POST', body: fd });
+      await fetch('/api/config/mode', { method: 'POST', body: fdMode });
+      const response = await fetch('/api/config/memory', { method: 'POST', body: fdMem });
       const result = await response.json();
       if (!response.ok) throw new Error(result.detail || response.statusText);
       
